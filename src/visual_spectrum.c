@@ -6,6 +6,7 @@
 
 // Función interna para dibujar el analizador de frecuencias
 void draw_spectrum(SDL_Renderer *renderer, const void *audio_data, size_t data_size, int channels, int format, int w, int h, bool *running) {
+  (void)running;
   size_t samples_per_channel = data_size / (channels * (format == paInt16 ? sizeof(int16_t) : sizeof(float)));
   fftw_complex *in, *out;
   fftw_plan plan;

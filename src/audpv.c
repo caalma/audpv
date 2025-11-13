@@ -20,6 +20,13 @@ static AudioConfig config = {0};
 bool visualize = false;
 const char *visualization_type = NULL;
 
+// Buffer compartido y sincronización
+static void *shared_audio_buffer = NULL;
+static size_t shared_buffer_size = 0;
+static bool new_data_available = false;
+static SDL_mutex *audio_mutex = NULL;
+static SDL_cond *audio_cond = NULL;
+
 // Función para mostrar la ayuda
 void print_help(const char *program_name) {
   printf("Uso: %s [opciones]\n", program_name);
@@ -37,7 +44,6 @@ void print_help(const char *program_name) {
   printf("  - Ejemplo de uso con ffmpeg: ffmpeg -i archivo.mp3 -f s16le -ar 8000 - | %s -f s16le -r 8000 -c 1 -v waveformdot\n", program_name);
 }
 
-
 // Manejador de señal para detener la reproducción
 void handle_signal(int sig) {
   if (sig == SIGINT) {
@@ -45,7 +51,7 @@ void handle_signal(int sig) {
   }
 }
 
-// Callback de PortAudio para procesar los datos de audio
+// Callback de PortAudio para procesar los datos de audio (solo copia datos, sin visualización)
 static int audioCallback(const void *inputBuffer, void *outputBuffer,
                          unsigned long framesPerBuffer,
                          const PaStreamCallbackTimeInfo* timeInfo,
@@ -67,12 +73,17 @@ static int audioCallback(const void *inputBuffer, void *outputBuffer,
   }
 
   if (visualize) {
-    visualizer_update(outputBuffer, bytesToRead, config.channels, config.format, config.sampleRate);
+    // Copiar datos al buffer compartido (rápido, protegido por mutex)
+    SDL_LockMutex(audio_mutex);
+    memcpy(shared_audio_buffer, outputBuffer, bytesToRead);
+    shared_buffer_size = bytesToRead;
+    new_data_available = true;
+    SDL_CondSignal(audio_cond);
+    SDL_UnlockMutex(audio_mutex);
   }
 
   return paContinue;
 }
-
 
 // Función para calcular FRAMES_PER_BUFFER dinámicamente
 unsigned long calculate_frames_per_buffer(int sampleRate, int refreshRate) {
@@ -87,7 +98,6 @@ unsigned long calculate_frames_per_buffer(int sampleRate, int refreshRate) {
 
     return framesPerBuffer;
 }
-
 
 int get_refresh_rate() {
   // Inicializar SDL para obtener la frecuencia de refresco
@@ -106,8 +116,6 @@ int get_refresh_rate() {
     int refresh_rate = display_mode.refresh_rate > 0 ? display_mode.refresh_rate : 60; // Predeterminado: 60 Hz
     return refresh_rate;
 }
-
-
 
 int main(int argc, char *argv[]) {
   // Configuración inicial
@@ -168,6 +176,16 @@ int main(int argc, char *argv[]) {
   // Definir dinámicamente el FramesPerBuffer según el samplerate seleccionado
   config.framesPerBuffer = calculate_frames_per_buffer(config.sampleRate, config.refreshRate);
 
+  // Inicializar sincronización
+  audio_mutex = SDL_CreateMutex();
+  audio_cond = SDL_CreateCond();
+  size_t max_buffer_size = config.framesPerBuffer * config.channels * (config.format == paInt16 ? sizeof(short) : sizeof(float));
+  shared_audio_buffer = malloc(max_buffer_size);
+  if (!audio_mutex || !audio_cond || !shared_audio_buffer) {
+    fprintf(stderr, "Error al inicializar sincronización SDL.\n");
+    return 1;
+  }
+
   // Inicializar PortAudio
   PaError err = Pa_Initialize();
   if (err != paNoError) {
@@ -187,7 +205,7 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  // Seteo de visulizador
+  // Seteo de visualizador (en hilo principal)
   if (visualize) {
     if (!visualizer_init(800, 400, visualization_type, window_title)) {
       fprintf(stderr, "Error al inicializar el visualizador.\n");
@@ -203,7 +221,6 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Error al iniciar el stream: %s\n", Pa_GetErrorText(err));
     Pa_CloseStream(stream);
     Pa_Terminate();
-    //print_help(argv[0]);
     return 1;
   }
 
@@ -212,20 +229,60 @@ int main(int argc, char *argv[]) {
 
   printf("Reproduciendo... Presiona Ctrl+C para detener.\n");
 
-  // Loop principal basado en eventos de SDL
+  // Loop principal en hilo main: espera datos nuevos y actualiza visualizador con cap de FPS
+  void *local_audio_buffer = malloc(max_buffer_size);
+  const int target_frame_time_ms = 1000 / config.refreshRate;  // ej. 16ms para 60Hz
+
   while (config.running) {
+    Uint32 frame_start = SDL_GetTicks();  // Medir tiempo inicial
+
+    // Esperar señal de nuevos datos
+    SDL_LockMutex(audio_mutex);
+    while (!new_data_available && config.running) {
+      SDL_CondWait(audio_cond, audio_mutex);
+    }
+    if (!config.running) {
+      SDL_UnlockMutex(audio_mutex);
+      break;
+    }
+    // Copiar datos localmente
+    memcpy(local_audio_buffer, shared_audio_buffer, shared_buffer_size);
+    size_t local_size = shared_buffer_size;
+    new_data_available = false;
+    SDL_UnlockMutex(audio_mutex);
+
+    // Actualizar visualizador con copia local
+    if (visualize) {
+      visualizer_update(local_audio_buffer, local_size, config.channels, config.format, config.sampleRate);
+    }
+
+    // Manejar eventos
     visualizer_events();
-    Pa_Sleep(10);
+
+    // Cap de FPS: calcular tiempo transcurrido y delay para sincronizar
+    Uint32 frame_end = SDL_GetTicks();
+    int elapsed_ms = frame_end - frame_start;
+    int delay_ms = target_frame_time_ms - elapsed_ms;
+    if (delay_ms > 0) {
+      SDL_Delay(delay_ms);
+    }
   }
+
+  free(local_audio_buffer);
 
   // Detener y cerrar el stream
   Pa_StopStream(stream);
   Pa_CloseStream(stream);
   Pa_Terminate();
 
-  if (visualize && strcmp(visualization_type, "waveform") == 0) {
+  if (visualize) {
     visualizer_cleanup();
   }
+
+  // Limpiar sincronización
+  free(shared_audio_buffer);
+  SDL_DestroyCond(audio_cond);
+  SDL_DestroyMutex(audio_mutex);
 
   printf("\nReproducción detenida.\n");
   return 0;

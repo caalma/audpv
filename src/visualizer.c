@@ -17,6 +17,10 @@ static SDL_Renderer *renderer = NULL;
 static bool running = true;
 static const char *current_visualization = NULL;
 
+// Textura compartida para todos los freqwalk
+SDL_Texture *waterfall_texture = NULL;
+static int texture_width = 0;
+static int texture_height = 0;
 
 // Imprimir atajos de teclado del visualizador
 void print_help_visualizer() {
@@ -50,6 +54,13 @@ void draw_none(SDL_Renderer *renderer) {
 
 // Inicializa el visualizador con un tipo específico
 bool visualizer_init(int width, int height, const char *type, const char *window_title) {
+  if (waterfall_texture) {
+    SDL_DestroyTexture(waterfall_texture);
+    waterfall_texture = NULL;
+  }
+  texture_width = 0;
+  texture_height = 0;
+
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0) {
     fprintf(stderr, "Error al inicializar SDL: %s\n", SDL_GetError());
     return false;
@@ -63,7 +74,8 @@ bool visualizer_init(int width, int height, const char *type, const char *window
     return false;
   }
 
-  renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+  renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+
   if (!renderer) {
     fprintf(stderr, "Error al crear el renderizador: %s\n", SDL_GetError());
     SDL_DestroyWindow(window);
@@ -103,10 +115,10 @@ void visualizer_update(const void *audio_data, size_t data_size, int channels, i
     draw_freqwalk_fit_logarithmic(renderer, audio_data, data_size, channels, format, w, h, sampleRate, &running);
 
   } else if (strcmp(current_visualization, "freqlin") == 0) {
-    draw_freq_linear(renderer, audio_data, data_size, channels, format, w, h, sampleRate, &running);
+    draw_freq_linear(renderer, audio_data, data_size, channels, format, w, h, &running);
 
   } else if (strcmp(current_visualization, "freqlog") == 0) {
-    draw_freq_logarithmic(renderer, audio_data, data_size, channels, format, w, h, sampleRate, &running);
+    draw_freq_logarithmic(renderer, audio_data, data_size, channels, format, w, h, &running);
 
   } else {
     draw_none(renderer);
@@ -191,6 +203,13 @@ void visualizer_events() {
 
 // Libera los recursos del visualizador
 void visualizer_cleanup() {
+if (waterfall_texture) {
+        SDL_DestroyTexture(waterfall_texture);
+        waterfall_texture = NULL;
+    }
+    texture_width = 0;
+    texture_height = 0;
+
   if (renderer) SDL_DestroyRenderer(renderer);
   if (window) SDL_DestroyWindow(window);
   SDL_Quit();

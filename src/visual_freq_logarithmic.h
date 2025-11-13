@@ -4,6 +4,6 @@
 #include <SDL2/SDL.h>
 #include <stddef.h>
 
-void draw_freq_logarithmic(SDL_Renderer *renderer, const void *audio_data, size_t data_size, int channels, int format, int w, int h, int sampleRate, bool *running);
+void draw_freq_logarithmic(SDL_Renderer *renderer, const void *audio_data, size_t data_size, int channels, int format, int w, int h, bool *running);
 
 #endif
